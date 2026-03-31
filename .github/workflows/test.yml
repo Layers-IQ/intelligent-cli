@@ -1,0 +1,230 @@
+---
+# ==============================================================================
+# zsh-ai-complete: CI Test Pipeline
+# File: .github/workflows/test.yml
+# ==============================================================================
+#
+# Runs the full TAP-compatible test suite on every push and pull request.
+# Tests target zsh 5.3+ on both macOS (latest) and Ubuntu (latest).
+#
+# TAP output is captured and failures cause the workflow to exit non-zero.
+# Test results are uploaded as artifacts for review.
+#
+# Usage (local): zsh tests/test_runner.zsh
+# Usage (CI):    Triggered automatically via this workflow
+# ==============================================================================
+
+name: Test Suite
+
+on:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+      - 'fix/**'
+  pull_request:
+    branches:
+      - main
+
+  # Allow manual trigger from GitHub Actions UI
+  workflow_dispatch:
+
+# Cancel in-progress runs for the same branch/PR when new commits arrive.
+# Prevents duplicate runs on rapid pushes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Unit & Integration Tests ─────────────────────────────────────────────────
+  test:
+    name: "Tests (zsh ${{ matrix.zsh-version }} / ${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false   # Run all matrix entries even if one fails
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+        zsh-version:
+          - system         # Use system-provided zsh (latest available)
+
+    steps:
+      # ── Checkout ─────────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Install zsh (Linux only — macOS ships with zsh) ───────────────────
+      - name: Install zsh (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y zsh
+
+      # ── Verify zsh version ────────────────────────────────────────────────
+      - name: Verify zsh version (must be ≥ 5.3)
+        run: |
+          ZSH_VERSION_STR="$(zsh --version)"
+          echo "zsh version: ${ZSH_VERSION_STR}"
+
+          # Extract major.minor (e.g. "5.9" from "zsh 5.9 ...")
+          ZSH_VER="$(zsh --version | awk '{print $2}')"
+          ZSH_MAJOR="$(echo "${ZSH_VER}" | cut -d. -f1)"
+          ZSH_MINOR="$(echo "${ZSH_VER}" | cut -d. -f2)"
+
+          if [ "${ZSH_MAJOR}" -lt 5 ] || { [ "${ZSH_MAJOR}" -eq 5 ] && [ "${ZSH_MINOR}" -lt 3 ]; }; then
+            echo "ERROR: zsh ${ZSH_VER} is below minimum requirement 5.3"
+            exit 1
+          fi
+          echo "zsh ${ZSH_VER} satisfies minimum version requirement (≥ 5.3)"
+
+      # ── Verify test files exist ───────────────────────────────────────────
+      - name: Verify test infrastructure
+        run: |
+          echo "=== Test files ==="
+          ls -la tests/
+          echo ""
+          echo "=== Plugin lib files ==="
+          ls -la plugin/lib/
+          echo ""
+          # Fail if required files are missing
+          for f in \
+            tests/test_runner.zsh \
+            tests/test_config.zsh \
+            tests/test_security.zsh \
+            tests/test_context.zsh \
+            tests/test_prompt.zsh \
+            tests/test_ollama.zsh \
+            tests/test_suggestion.zsh \
+            plugin/lib/config.zsh \
+            plugin/lib/security.zsh \
+            plugin/lib/context.zsh \
+            plugin/lib/prompt.zsh \
+            plugin/lib/ollama.zsh \
+            plugin/lib/suggestion.zsh; do
+            if [ ! -f "${f}" ]; then
+              echo "MISSING: ${f}"
+              exit 1
+            fi
+            echo "OK: ${f}"
+          done
+
+      # ── Syntax check: plugin lib files ───────────────────────────────────
+      - name: Syntax check — plugin lib files
+        run: |
+          FAILED=0
+          for f in plugin/lib/*.zsh; do
+            echo -n "Checking syntax: ${f} ... "
+            if ! zsh -n "${f}" 2>&1; then
+              echo "SYNTAX ERROR"
+              FAILED=1
+            else
+              echo "OK"
+            fi
+          done
+          [ "${FAILED}" -eq 0 ] || { echo "Syntax errors found in plugin lib files"; exit 1; }
+
+      # ── Syntax check: test files ─────────────────────────────────────────
+      - name: Syntax check — test files
+        run: |
+          FAILED=0
+          for f in tests/test_*.zsh; do
+            echo -n "Checking syntax: ${f} ... "
+            if ! zsh -n "${f}" 2>&1; then
+              echo "SYNTAX ERROR"
+              FAILED=1
+            else
+              echo "OK"
+            fi
+          done
+          [ "${FAILED}" -eq 0 ] || { echo "Syntax errors found in test files"; exit 1; }
+
+      # ── Run unit tests (fast, no network) ────────────────────────────────
+      # Run component tests individually first for faster fail feedback.
+      # This "fail fast" ordering ensures the cheapest tests run before
+      # the more complex integration-level tests.
+
+      - name: Run config tests
+        run: |
+          echo "=== Running test_config.zsh ==="
+          zsh tests/test_config.zsh
+        env:
+          # Ensure no user environment leaks into the test
+          ZSH_AI_COMPLETE_OLLAMA_URL: ""
+          ZSH_AI_COMPLETE_MODEL: ""
+          ZSH_AI_COMPLETE_DEBOUNCE: ""
+          ZSH_AI_COMPLETE_TIMEOUT: ""
+          ZSH_AI_COMPLETE_TRIGGER: ""
+
+      - name: Run security tests
+        run: |
+          echo "=== Running test_security.zsh ==="
+          zsh tests/test_security.zsh
+
+      - name: Run context tests
+        run: |
+          echo "=== Running test_context.zsh ==="
+          zsh tests/test_context.zsh
+
+      - name: Run prompt tests
+        run: |
+          echo "=== Running test_prompt.zsh ==="
+          zsh tests/test_prompt.zsh
+
+      - name: Run ollama tests
+        run: |
+          echo "=== Running test_ollama.zsh ==="
+          # Ollama is NOT running in CI — mock curl handles all HTTP calls
+          zsh tests/test_ollama.zsh
+
+      - name: Run suggestion tests
+        run: |
+          echo "=== Running test_suggestion.zsh ==="
+          zsh tests/test_suggestion.zsh
+
+      # ── Run full TAP suite ────────────────────────────────────────────────
+      # This runs all tests together and captures TAP output as an artifact.
+      - name: Run full test suite (TAP output)
+        run: |
+          echo "=== Full test suite via test_runner.zsh ==="
+          zsh tests/test_runner.zsh | tee test-results-${{ runner.os }}.tap
+          TAP_EXIT=${PIPESTATUS[0]}
+          echo ""
+          echo "Exit code: ${TAP_EXIT}"
+          exit ${TAP_EXIT}
+        env:
+          ZSH_AI_COMPLETE_OLLAMA_URL: ""
+          ZSH_AI_COMPLETE_MODEL: ""
+          ZSH_AI_COMPLETE_DEBOUNCE: ""
+          ZSH_AI_COMPLETE_TIMEOUT: ""
+          ZSH_AI_COMPLETE_TRIGGER: ""
+
+      # ── Upload TAP results ────────────────────────────────────────────────
+      - name: Upload TAP test results
+        uses: actions/upload-artifact@v4
+        if: always()    # Upload even on failure for debugging
+        with:
+          name: tap-results-${{ matrix.os }}-${{ github.sha }}
+          path: "*.tap"
+          retention-days: 30
+
+  # ── Summary job ─────────────────────────────────────────────────────────────
+  # Provides a single required status check that aggregates all matrix results.
+  # Configure branch protection to require this job rather than each matrix leg.
+  all-tests-passed:
+    name: All Tests Passed
+    runs-on: ubuntu-latest
+    needs: test
+    if: always()
+    steps:
+      - name: Check all test jobs succeeded
+        run: |
+          if [ "${{ needs.test.result }}" = "success" ]; then
+            echo "All test matrix jobs passed."
+            exit 0
+          else
+            echo "One or more test matrix jobs failed. See above for details."
+            exit 1
+          fi

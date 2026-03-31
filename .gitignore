@@ -1,0 +1,6 @@
+
+# Orchestrator runtime artifacts
+.knowledge/
+workspace/
+.mcp.json
+.mcp-test-runner-cache.json
