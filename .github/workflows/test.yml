@@ -22,6 +22,7 @@ on:
       - main
       - 'feature/**'
       - 'fix/**'
+      - 'release/**'
   pull_request:
     branches:
       - main
@@ -98,12 +99,21 @@ jobs:
             tests/test_prompt.zsh \
             tests/test_ollama.zsh \
             tests/test_suggestion.zsh \
+            tests/test_keybindings.zsh \
+            tests/test_async.zsh \
+            tests/test_init.zsh \
+            plugin/zsh-ai-complete.plugin.zsh \
             plugin/lib/config.zsh \
             plugin/lib/security.zsh \
             plugin/lib/context.zsh \
             plugin/lib/prompt.zsh \
             plugin/lib/ollama.zsh \
-            plugin/lib/suggestion.zsh; do
+            plugin/lib/suggestion.zsh \
+            plugin/lib/async.zsh \
+            plugin/lib/keybindings.zsh \
+            plugin/lib/init.zsh \
+            scripts/install.sh \
+            scripts/uninstall.sh; do
             if [ ! -f "${f}" ]; then
               echo "MISSING: ${f}"
               exit 1
@@ -183,6 +193,25 @@ jobs:
         run: |
           echo "=== Running test_suggestion.zsh ==="
           zsh tests/test_suggestion.zsh
+
+      - name: Run keybindings tests
+        run: |
+          echo "=== Running test_keybindings.zsh ==="
+          zsh tests/test_keybindings.zsh
+
+      - name: Run async engine tests
+        run: |
+          echo "=== Running test_async.zsh ==="
+          zsh tests/test_async.zsh
+
+      - name: Run init / plugin loader tests
+        run: |
+          echo "=== Running test_init.zsh ==="
+          # Ollama is NOT running in CI — health/model checks are stubbed in test
+          zsh tests/test_init.zsh
+        env:
+          ZSH_AI_COMPLETE_OLLAMA_URL: ""
+          ZSH_AI_COMPLETE_MODEL: ""
 
       # ── Run full TAP suite ────────────────────────────────────────────────
       # This runs all tests together and captures TAP output as an artifact.

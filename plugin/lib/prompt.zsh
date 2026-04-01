@@ -180,8 +180,13 @@ _zai_build_completion_prompt() {
     context="$(_zai_truncate_context "${context}" "${avail}")"
   fi
 
-  # Emit prompt without trailing newline — model continues inline from middle
-  printf '%s' "<|fim_prefix|>${context}${buffer}<|fim_suffix|><|fim_middle|>"
+  # Emit prompt without trailing newline — model continues inline from middle.
+  # The "\n$ " separator between context and buffer is critical: without it the
+  # model may treat the buffer as a continuation of the context narrative (e.g.
+  # "git sta" + git status context → verbose explanation instead of "tus").
+  # The "$ " shell prompt marker signals that a command line follows.
+  printf '%s' "<|fim_prefix|>${context}
+\$ ${buffer}<|fim_suffix|><|fim_middle|>"
 }
 
 # ==============================================================================
@@ -294,10 +299,10 @@ _zai_get_generation_params() {
 
   case "${mode}" in
     nl_to_cmd|nl_translation|nl)
-      printf '%s' '{"temperature":0.2,"top_k":40,"num_predict":150,"stop":["\n\n"],"raw":true}'
+      printf '%s' '{"temperature":0.2,"top_k":40,"num_predict":150,"stop":["\n\n"]}'
       ;;
     completion|*)
-      printf '%s' '{"temperature":0.1,"top_k":20,"num_predict":60,"stop":["\n"],"raw":true}'
+      printf '%s' '{"temperature":0.1,"top_k":20,"num_predict":60,"stop":["\n"]}'
       ;;
   esac
 }

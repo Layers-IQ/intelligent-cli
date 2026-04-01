@@ -1,0 +1,367 @@
+---
+# ==============================================================================
+# zsh-ai-complete: Release Automation Pipeline
+# File: .github/workflows/release.yml
+# ==============================================================================
+#
+# Automates GitHub releases when a version tag is pushed.
+#
+# Trigger:
+#   git tag v1.2.3 && git push origin v1.2.3
+#
+# What this does:
+#   1. Validates the tag follows semver (v MAJOR.MINOR.PATCH)
+#   2. Runs the FULL test suite on Ubuntu + macOS (must pass to release)
+#   3. Packages the plugin into a tarball and zip
+#   4. Generates SHA-256 checksums for all release artifacts
+#   5. Creates a GitHub Release with:
+#      - Auto-generated release notes from commit history
+#      - Plugin tarball and zip attached
+#      - Checksums file attached
+#      - Install instructions in the release body
+#
+# Requirements:
+#   - GITHUB_TOKEN is automatically provided by Actions (no setup needed)
+#   - Tag must be on the main branch
+#
+# Versioning convention:
+#   v1.0.0  — Major release (breaking changes)
+#   v1.1.0  — Minor release (new features, backward compatible)
+#   v1.0.1  — Patch release (bug fixes)
+#   v1.0.0-beta.1 — Pre-release
+# ==============================================================================
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'        # e.g. v1.2.3
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'      # e.g. v1.2.3-beta.1
+
+# Releases require explicit permissions
+permissions:
+  contents: write    # For creating releases and uploading assets
+  actions: read      # For reading workflow results
+
+jobs:
+  # ── Validate tag ─────────────────────────────────────────────────────────────
+  validate-tag:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+      is_prerelease: ${{ steps.parse.outputs.is_prerelease }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Parse and validate tag
+        id: parse
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "Tag: ${TAG}"
+
+          # Validate semver format
+          if ! echo "${TAG}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9._-]+)?$'; then
+            echo "ERROR: Tag '${TAG}' does not follow semver format (vMAJOR.MINOR.PATCH)"
+            exit 1
+          fi
+
+          # Strip the leading 'v' for the version string
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+          # Detect pre-release (contains hyphen after patch version)
+          if echo "${TAG}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+-'; then
+            echo "is_prerelease=true" >> "${GITHUB_OUTPUT}"
+            echo "Pre-release: true"
+          else
+            echo "is_prerelease=false" >> "${GITHUB_OUTPUT}"
+            echo "Pre-release: false"
+          fi
+
+          echo "Version: ${VERSION}"
+
+      - name: Verify tag is on main branch
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # Check if this tag commit is reachable from main
+          git fetch origin main --depth=50 2>/dev/null || true
+          if git merge-base --is-ancestor "${TAG}" origin/main 2>/dev/null; then
+            echo "Tag ${TAG} is on or ahead of main branch — OK"
+          else
+            echo "WARNING: Tag ${TAG} may not be on the main branch."
+            echo "Proceeding anyway — manual release workflow."
+          fi
+
+  # ── Run full test suite (gate for release) ──────────────────────────────────
+  test-gate:
+    name: "Test gate (${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    needs: validate-tag
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: true    # Fail fast on release — don't release broken code
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install zsh (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y zsh
+
+      - name: Verify zsh version
+        run: |
+          ZSH_VER="$(zsh --version | awk '{print $2}')"
+          ZSH_MAJOR="$(echo "${ZSH_VER}" | cut -d. -f1)"
+          ZSH_MINOR="$(echo "${ZSH_VER}" | cut -d. -f2)"
+          echo "zsh ${ZSH_VER}"
+          if [ "${ZSH_MAJOR}" -lt 5 ] || { [ "${ZSH_MAJOR}" -eq 5 ] && [ "${ZSH_MINOR}" -lt 3 ]; }; then
+            echo "ERROR: zsh ${ZSH_VER} < 5.3"
+            exit 1
+          fi
+
+      - name: Syntax check — all plugin files
+        run: |
+          FAILED=0
+          for f in plugin/zsh-ai-complete.plugin.zsh plugin/lib/*.zsh; do
+            zsh -n "${f}" 2>&1 || { echo "SYNTAX ERROR: ${f}"; FAILED=1; }
+          done
+          [ "${FAILED}" -eq 0 ] || exit 1
+          echo "All syntax checks passed"
+
+      - name: Run full test suite
+        run: |
+          zsh tests/test_runner.zsh
+        env:
+          ZSH_AI_COMPLETE_OLLAMA_URL: ""
+          ZSH_AI_COMPLETE_MODEL: ""
+          ZSH_AI_COMPLETE_DEBOUNCE: ""
+          ZSH_AI_COMPLETE_TIMEOUT: ""
+          ZSH_AI_COMPLETE_TRIGGER: ""
+
+  # ── Build release artifacts ──────────────────────────────────────────────────
+  build:
+    name: Build release artifacts
+    runs-on: ubuntu-latest
+    needs: [validate-tag, test-gate]
+    timeout-minutes: 10
+    outputs:
+      tarball: ${{ steps.package.outputs.tarball }}
+      zipfile: ${{ steps.package.outputs.zipfile }}
+      checksums: ${{ steps.package.outputs.checksums }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set version variables
+        run: |
+          echo "VERSION=${{ needs.validate-tag.outputs.version }}" >> "${GITHUB_ENV}"
+          echo "PLUGIN_DIR=zsh-ai-complete-${{ needs.validate-tag.outputs.version }}" >> "${GITHUB_ENV}"
+
+      - name: Create release package
+        id: package
+        run: |
+          VERSION="${{ needs.validate-tag.outputs.version }}"
+          ARTIFACT_DIR="zsh-ai-complete-${VERSION}"
+          TARBALL="zsh-ai-complete-${VERSION}.tar.gz"
+          ZIPFILE="zsh-ai-complete-${VERSION}.zip"
+          CHECKSUMS="zsh-ai-complete-${VERSION}.sha256"
+
+          echo "=== Building release package: ${VERSION} ==="
+
+          # Create staging directory with clean structure
+          mkdir -p "${ARTIFACT_DIR}/plugin/lib"
+          mkdir -p "${ARTIFACT_DIR}/scripts"
+
+          # Copy plugin files
+          cp plugin/zsh-ai-complete.plugin.zsh "${ARTIFACT_DIR}/plugin/"
+          cp plugin/lib/*.zsh "${ARTIFACT_DIR}/plugin/lib/"
+
+          # Copy scripts
+          cp scripts/install.sh "${ARTIFACT_DIR}/scripts/"
+          cp scripts/uninstall.sh "${ARTIFACT_DIR}/scripts/"
+          chmod +x "${ARTIFACT_DIR}/scripts/install.sh"
+          chmod +x "${ARTIFACT_DIR}/scripts/uninstall.sh"
+
+          # Copy documentation
+          [ -f README.md ]  && cp README.md  "${ARTIFACT_DIR}/" || true
+          [ -f RUNBOOK.md ] && cp RUNBOOK.md "${ARTIFACT_DIR}/" || true
+          [ -f CHANGELOG.md ] && cp CHANGELOG.md "${ARTIFACT_DIR}/" || true
+
+          # Embed version into plugin main file
+          # Adds a _ZAI_VERSION constant that users can inspect
+          sed -i "s/^# File: plugin\/zsh-ai-complete.plugin.zsh/# Version: ${VERSION}\n# File: plugin\/zsh-ai-complete.plugin.zsh/" \
+            "${ARTIFACT_DIR}/plugin/zsh-ai-complete.plugin.zsh" 2>/dev/null || true
+
+          # Set secure permissions
+          find "${ARTIFACT_DIR}" -type f -name "*.zsh" -exec chmod 644 {} \;
+          find "${ARTIFACT_DIR}" -type f -name "*.sh" -exec chmod 755 {} \;
+          find "${ARTIFACT_DIR}" -type d -exec chmod 755 {} \;
+
+          # Build tarball
+          tar -czf "${TARBALL}" "${ARTIFACT_DIR}"
+          echo "Built: ${TARBALL} ($(du -sh "${TARBALL}" | cut -f1))"
+
+          # Build zip
+          zip -r "${ZIPFILE}" "${ARTIFACT_DIR}" -x "*.DS_Store" -x "__MACOSX/*"
+          echo "Built: ${ZIPFILE} ($(du -sh "${ZIPFILE}" | cut -f1))"
+
+          # Generate checksums
+          sha256sum "${TARBALL}" "${ZIPFILE}" > "${CHECKSUMS}"
+          echo "Checksums:"
+          cat "${CHECKSUMS}"
+
+          # Set outputs
+          echo "tarball=${TARBALL}" >> "${GITHUB_OUTPUT}"
+          echo "zipfile=${ZIPFILE}" >> "${GITHUB_OUTPUT}"
+          echo "checksums=${CHECKSUMS}" >> "${GITHUB_OUTPUT}"
+
+          # Clean up staging directory
+          rm -rf "${ARTIFACT_DIR}"
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts-${{ needs.validate-tag.outputs.version }}
+          path: |
+            zsh-ai-complete-*.tar.gz
+            zsh-ai-complete-*.zip
+            zsh-ai-complete-*.sha256
+          retention-days: 7
+
+  # ── Create GitHub Release ────────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [validate-tag, test-gate, build]
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts-${{ needs.validate-tag.outputs.version }}
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          VERSION="${{ needs.validate-tag.outputs.version }}"
+          TAG="v${VERSION}"
+
+          # Find the previous release tag for changelog generation
+          PREV_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+' | sed -n '2p' || echo "")
+
+          echo "=== Generating release notes from ${PREV_TAG:-initial} to ${TAG} ==="
+
+          {
+            echo "## zsh-ai-complete ${TAG}"
+            echo ""
+            echo "AI-powered zsh autocomplete using [Ollama](https://ollama.ai) and the qwen2.5-coder model — 100% local, zero data sent externally."
+            echo ""
+
+            if [ -f CHANGELOG.md ]; then
+              echo "## What's Changed"
+              echo ""
+              # Extract section for this version from CHANGELOG.md if it exists
+              awk "/^## \[${VERSION}\]/{found=1; next} found && /^## /{exit} found{print}" CHANGELOG.md || true
+              echo ""
+            fi
+
+            if [ -n "${PREV_TAG}" ]; then
+              echo "## Commits since ${PREV_TAG}"
+              echo ""
+              git log "${PREV_TAG}..${TAG}" \
+                --pretty=format:"- %s ([%h](https://github.com/${{ github.repository }}/commit/%H))" \
+                --no-merges \
+                2>/dev/null | head -50 || echo "_(no commits)_"
+              echo ""
+            fi
+
+            echo "## Installation"
+            echo ""
+            echo "\`\`\`bash"
+            echo "# Clone and install"
+            echo "git clone https://github.com/${{ github.repository }}.git"
+            echo "cd zsh-ai-complete"
+            echo "bash scripts/install.sh"
+            echo ""
+            echo "# Or download and extract the release tarball:"
+            echo "curl -Lo zsh-ai-complete-${VERSION}.tar.gz \\"
+            echo "  https://github.com/${{ github.repository }}/releases/download/v${VERSION}/zsh-ai-complete-${VERSION}.tar.gz"
+            echo "tar -xzf zsh-ai-complete-${VERSION}.tar.gz"
+            echo "cd zsh-ai-complete-${VERSION}"
+            echo "bash scripts/install.sh"
+            echo "\`\`\`"
+            echo ""
+            echo "## Prerequisites"
+            echo ""
+            echo "- zsh 5.3+"
+            echo "- [Ollama](https://ollama.ai) running locally"
+            echo "- \`ollama pull qwen2.5-coder:7b\` (or configure \`ZSH_AI_COMPLETE_MODEL\`)"
+            echo ""
+            echo "## Verification"
+            echo ""
+            echo "Verify the download with the provided checksums:"
+            echo ""
+            echo "\`\`\`bash"
+            echo "sha256sum -c zsh-ai-complete-${VERSION}.sha256"
+            echo "\`\`\`"
+            echo ""
+            echo "## Support"
+            echo ""
+            echo "- [Installation Runbook](RUNBOOK.md)"
+            echo "- [Report Issues](https://github.com/${{ github.repository }}/issues)"
+          } > release_notes.md
+
+          echo "Release notes generated."
+          cat release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "zsh-ai-complete v${{ needs.validate-tag.outputs.version }}"
+          body_path: release_notes.md
+          prerelease: ${{ needs.validate-tag.outputs.is_prerelease }}
+          draft: false
+          fail_on_unmatched_files: true
+          files: |
+            zsh-ai-complete-${{ needs.validate-tag.outputs.version }}.tar.gz
+            zsh-ai-complete-${{ needs.validate-tag.outputs.version }}.zip
+            zsh-ai-complete-${{ needs.validate-tag.outputs.version }}.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Post-release summary
+        run: |
+          VERSION="${{ needs.validate-tag.outputs.version }}"
+          echo ""
+          echo "=== Release v${VERSION} created ==="
+          echo ""
+          echo "Assets:"
+          ls -lh zsh-ai-complete-${VERSION}.* 2>/dev/null || true
+          echo ""
+          echo "Checksums:"
+          cat "zsh-ai-complete-${VERSION}.sha256"
+          echo ""
+          echo "Release URL: https://github.com/${{ github.repository }}/releases/tag/v${VERSION}"

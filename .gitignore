@@ -1,6 +1,45 @@
 
-# Orchestrator runtime artifacts
+# Orchestrator / IDE runtime artifacts
 .knowledge/
 workspace/
 .mcp.json
 .mcp-test-runner-cache.json
+.claude/
+
+# Plugin runtime — never commit user-specific cache
+.cache/
+*.log
+
+# Release build artifacts
+dist/
+zsh-ai-complete-*.tar.gz
+zsh-ai-complete-*.zip
+zsh-ai-complete-*.sha256
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor and IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test output
+*.tap
+test-results-*.tap
+
+# Security — never commit these
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.yaml
+id_rsa
+id_ed25519

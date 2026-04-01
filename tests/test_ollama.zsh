@@ -353,7 +353,7 @@ _test_load_ollama
 local parsed
 
 # Simple response field
-parsed="$(_zai_ollama_parse_response '{"model":"qwen2.5-coder:3b","response":"ls -la","done":true}')"
+parsed="$(_zai_ollama_parse_response '{"model":"qwen2.5-coder:7b","response":"ls -la","done":true}')"
 assert_equal "parses simple response field" "ls -la" "${parsed}"
 
 # Response among multiple fields
@@ -430,7 +430,7 @@ print "# --- 11. _zai_ollama_generate runtime behavior ---"
 _test_load_ollama
 
 # Test: generate returns parsed completion text
-_mock_curl_setup '{"model":"qwen2.5-coder:3b","response":"docker ps -a","done":true}' 0
+_mock_curl_setup '{"model":"qwen2.5-coder:7b","response":"docker ps -a","done":true}' 0
 
 local completion
 completion="$(_zai_ollama_generate "list running containers" '{"temperature":0.1}')"
@@ -557,10 +557,10 @@ _test_load_ollama
 
 # AC-10: returns 0 when specified model is present
 local tags_with_model
-tags_with_model='{"models":[{"name":"qwen2.5-coder:3b","model":"qwen2.5-coder:3b","size":1234}]}'
+tags_with_model='{"models":[{"name":"qwen2.5-coder:7b","model":"qwen2.5-coder:7b","size":1234}]}'
 _mock_curl_setup "${tags_with_model}" 0
 
-_zai_ollama_check_model "qwen2.5-coder:3b"
+_zai_ollama_check_model "qwen2.5-coder:7b"
 assert_true "model check returns 0 when model present in tags (AC-10)" $?
 
 _mock_curl_teardown
@@ -570,7 +570,7 @@ local tags_without_model
 tags_without_model='{"models":[{"name":"llama2:7b","model":"llama2:7b"}]}'
 _mock_curl_setup "${tags_without_model}" 0
 
-_zai_ollama_check_model "qwen2.5-coder:3b"
+_zai_ollama_check_model "qwen2.5-coder:7b"
 assert_false "model check returns non-zero when model not found (AC-11)" $?
 
 _mock_curl_teardown
@@ -578,7 +578,7 @@ _mock_curl_teardown
 # AC-11: returns non-zero when Ollama is unreachable
 _mock_curl_setup "" 7
 
-_zai_ollama_check_model "qwen2.5-coder:3b"
+_zai_ollama_check_model "qwen2.5-coder:7b"
 assert_false "model check returns non-zero when Ollama unreachable (AC-11)" $?
 
 _mock_curl_teardown
@@ -592,20 +592,20 @@ _test_load_ollama
 
 # Exact name match required — partial prefix must not match
 local tags_similar
-tags_similar='{"models":[{"name":"qwen2.5-coder:3b-instruct","model":"qwen2.5-coder:3b-instruct"}]}'
+tags_similar='{"models":[{"name":"qwen2.5-coder:7b-instruct","model":"qwen2.5-coder:7b-instruct"}]}'
 _mock_curl_setup "${tags_similar}" 0
 
-_zai_ollama_check_model "qwen2.5-coder:3b"
+_zai_ollama_check_model "qwen2.5-coder:7b"
 assert_false "model check does not match prefix: 3b != 3b-instruct" $?
 
 _mock_curl_teardown
 
 # Multiple models — correct one is found
 local tags_multi
-tags_multi='{"models":[{"name":"llama2:7b"},{"name":"qwen2.5-coder:3b"},{"name":"mistral:7b"}]}'
+tags_multi='{"models":[{"name":"llama2:7b"},{"name":"qwen2.5-coder:7b"},{"name":"mistral:7b"}]}'
 _mock_curl_setup "${tags_multi}" 0
 
-_zai_ollama_check_model "qwen2.5-coder:3b"
+_zai_ollama_check_model "qwen2.5-coder:7b"
 assert_true "model check finds target among multiple models" $?
 
 _zai_ollama_check_model "llama2:7b"
@@ -626,7 +626,7 @@ assert_false "model check returns non-zero for empty model name" $?
 
 # Invalid URL
 ZSH_AI_COMPLETE_OLLAMA_URL="http://evil.com:11434"
-_zai_ollama_check_model "qwen2.5-coder:3b"
+_zai_ollama_check_model "qwen2.5-coder:7b"
 assert_false "model check returns non-zero for non-loopback URL" $?
 unset ZSH_AI_COMPLETE_OLLAMA_URL
 

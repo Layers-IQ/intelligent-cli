@@ -51,8 +51,8 @@ _test_load_config
 assert_equal "default ollama_url is http://localhost:11434" \
   "http://localhost:11434" "$(_zai_config_get ollama_url)"
 
-assert_equal "default model is qwen2.5-coder:3b" \
-  "qwen2.5-coder:3b" "$(_zai_config_get model)"
+assert_equal "default model is qwen2.5-coder:7b" \
+  "qwen2.5-coder:7b" "$(_zai_config_get model)"
 
 assert_equal "default debounce is 150" \
   "150" "$(_zai_config_get debounce)"

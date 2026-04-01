@@ -13,7 +13,7 @@
 # Available configuration keys and their defaults:
 #
 #   ollama_url     http://localhost:11434   Base URL for Ollama HTTP API
-#   model          qwen2.5-coder:3b         Ollama model to use
+#   model          qwen2.5-coder:7b         Ollama model to use
 #   debounce       150                      Keystroke debounce delay (ms)
 #   timeout        4                        HTTP request timeout (seconds)
 #   trigger        auto                     Completion trigger: auto | manual
@@ -45,7 +45,7 @@ typeset -gi _ZAI_CONFIG_LOADED=1
 typeset -gA _ZAI_CONFIG_DEFAULTS
 _ZAI_CONFIG_DEFAULTS=(
   ollama_url       "http://localhost:11434"
-  model            "qwen2.5-coder:3b"
+  model            "qwen2.5-coder:7b"
   debounce         "150"
   timeout          "4"
   trigger          "auto"

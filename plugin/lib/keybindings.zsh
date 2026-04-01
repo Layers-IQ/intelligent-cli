@@ -241,6 +241,34 @@ _zai_widget_manual_trigger() {
 }
 
 # ==============================================================================
+# _zai_widget_apply_completion
+#
+# Applies a pending async Ollama completion as ghost text. Invoked via
+# `zle _zai_widget_apply_completion` from the zle -F callback.
+#
+# BUFFER is empty in zle -F callbacks on some zsh/macOS builds, which breaks
+# POSTDISPLAY rendering. By routing through a real ZLE widget, BUFFER and
+# POSTDISPLAY are fully functional and the ghost text renders correctly.
+# ==============================================================================
+_zai_widget_apply_completion() {
+  if [[ -n "${_ZAI_PENDING_COMPLETION}" ]]; then
+    _zai_suggestion_highlight_remove
+    POSTDISPLAY="${_ZAI_PENDING_COMPLETION}"
+    _ZAI_SUGGESTION_PREFIX="${BUFFER}"
+
+    local style
+    style="$(_zai_config_get highlight_style 2>/dev/null)" || style="fg=8"
+    [[ -z "${style}" ]] && style="fg=8"
+    local entry="P0 ${#POSTDISPLAY} ${style}"
+    _ZAI_SUGGESTION_HIGHLIGHT="${entry}"
+    region_highlight+=("${entry}")
+
+    _ZAI_PENDING_COMPLETION=""
+    zle -R
+  fi
+}
+
+# ==============================================================================
 # _zai_widget_accept_line
 #
 # Wraps the ZLE built-in 'accept-line' widget (Enter key / Return).
@@ -306,6 +334,10 @@ _zai_register_widgets() {
 
   # Ctrl+Space: immediately trigger AI request bypassing debounce
   zle -N _zai_widget_manual_trigger
+
+  # Apply async completion — invoked from zle -F callback to ensure proper
+  # ZLE context (BUFFER is empty in zle -F on some zsh/macOS builds)
+  zle -N _zai_widget_apply_completion
 }
 
 # ==============================================================================

@@ -194,7 +194,7 @@ _zai_validate_ollama_url() {
 #   \uXXXX → passed through literally (Unicode surrogate pairs not decoded)
 #
 # Example input:
-#   {"model":"qwen2.5-coder:3b","response":"ls -la","done":true}
+#   {"model":"qwen2.5-coder:7b","response":"ls -la","done":true}
 # Example input with escapes:
 #   {"response":"echo \"hello\\nworld\"","done":true}
 #
@@ -314,7 +314,7 @@ _zai_ollama_generate() {
   # stream:false — collect full response in one curl call (simpler for short
   #                completions, avoids incremental ndjson parsing in pure zsh)
   local json
-  json="{\"model\":\"${model_escaped}\",\"prompt\":\"${prompt_escaped}\",\"stream\":false,\"options\":${options_json}}"
+  json="{\"model\":\"${model_escaped}\",\"prompt\":\"${prompt_escaped}\",\"stream\":false,\"raw\":true,\"options\":${options_json}}"
 
   # ── Execute HTTP POST via stdin pipe ──────────────────────────────────────
   #
@@ -389,13 +389,13 @@ _zai_ollama_check_health() {
 # by querying the /api/tags endpoint.
 #
 # The /api/tags response has the form:
-#   {"models":[{"name":"qwen2.5-coder:3b","model":"qwen2.5-coder:3b",...},...]}
+#   {"models":[{"name":"qwen2.5-coder:7b","model":"qwen2.5-coder:7b",...},...]}
 #
 # The model name is searched for as a JSON string value ("name") to avoid
 # false positives from partial substring matches.
 #
 # Args:
-#   model — Model name to check (e.g., "qwen2.5-coder:3b")
+#   model — Model name to check (e.g., "qwen2.5-coder:7b")
 #
 # Returns:
 #   0 — Model is present in the local Ollama store
@@ -430,6 +430,6 @@ _zai_ollama_check_model() {
   # Search for the model name as a JSON string value.
   # The /api/tags response lists models with "name":"<model>" entries.
   # We match the exact string in double quotes to avoid partial matches
-  # (e.g., "qwen2.5-coder:3b" should not match "qwen2.5-coder:3b-instruct").
+  # (e.g., "qwen2.5-coder:7b" should not match "qwen2.5-coder:7b-instruct").
   [[ "${response}" == *"\"${model}\""* ]]
 }

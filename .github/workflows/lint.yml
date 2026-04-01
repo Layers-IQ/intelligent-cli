@@ -1,0 +1,331 @@
+---
+# ==============================================================================
+# zsh-ai-complete: Linting and Static Analysis Pipeline
+# File: .github/workflows/lint.yml
+# ==============================================================================
+#
+# Runs ShellCheck on all shell scripts, checks for hardcoded secrets,
+# verifies file permissions, and validates the install script across platforms.
+#
+# Triggers:
+#   - Every push to main, feature/**, fix/**, release/**
+#   - Every pull request targeting main
+#   - Manual dispatch (workflow_dispatch)
+#
+# Jobs:
+#   shellcheck        — ShellCheck static analysis on all .zsh and .sh files
+#   secret-scan       — Grep-based secret pattern detection in source files
+#   install-smoke     — Smoke-test the install script (dry-run, no real install)
+# ==============================================================================
+
+name: Lint & Static Analysis
+
+on:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+      - 'fix/**'
+      - 'release/**'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── ShellCheck: zsh plugin files ────────────────────────────────────────────
+  shellcheck:
+    name: "ShellCheck (${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Install ShellCheck
+      - name: Install ShellCheck (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y shellcheck
+          shellcheck --version
+
+      - name: Install ShellCheck (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install shellcheck
+          shellcheck --version
+
+      # ShellCheck the main plugin file and all lib modules
+      # We use shell=bash for checking since ShellCheck doesn't have a zsh
+      # dialect, but bash is a close superset for syntax analysis purposes.
+      # Known zsh-specific constructs are excluded via inline directives.
+      - name: ShellCheck — plugin lib files
+        run: |
+          echo "=== ShellCheck: plugin/lib/*.zsh ==="
+          FAILED=0
+
+          for f in plugin/lib/*.zsh plugin/zsh-ai-complete.plugin.zsh; do
+            echo -n "  ${f} ... "
+            # SC1071: zsh is not supported → expected, ignore
+            # SC2148: need shebang → zsh sourced files don't have one
+            # SC2034: unused variable → zsh global typeset vars appear unused
+            # SC2154: referenced but not assigned → zsh parent-scope vars
+            if shellcheck \
+                --shell=bash \
+                --exclude=SC1071,SC2148,SC2034,SC2154,SC2296,SC2299,SC2300,SC2301 \
+                "${f}" 2>&1; then
+              echo "OK"
+            else
+              echo "FAILED"
+              FAILED=1
+            fi
+          done
+
+          [ "${FAILED}" -eq 0 ] || { echo ""; echo "ShellCheck found issues. Fix before merging."; exit 1; }
+
+      - name: ShellCheck — test files
+        run: |
+          echo "=== ShellCheck: tests/test_*.zsh ==="
+          FAILED=0
+
+          for f in tests/test_*.zsh; do
+            echo -n "  ${f} ... "
+            if shellcheck \
+                --shell=bash \
+                --exclude=SC1071,SC2148,SC2034,SC2154,SC2296,SC2299,SC2300,SC2301 \
+                "${f}" 2>&1; then
+              echo "OK"
+            else
+              echo "FAILED"
+              FAILED=1
+            fi
+          done
+
+          [ "${FAILED}" -eq 0 ] || { echo ""; echo "ShellCheck found issues in test files."; exit 1; }
+
+      - name: ShellCheck — install/uninstall scripts
+        run: |
+          echo "=== ShellCheck: scripts/*.sh ==="
+          FAILED=0
+
+          for f in scripts/*.sh; do
+            echo -n "  ${f} ... "
+            # These are true bash scripts — use strict bash checking
+            if shellcheck --shell=bash "${f}" 2>&1; then
+              echo "OK"
+            else
+              echo "FAILED"
+              FAILED=1
+            fi
+          done
+
+          [ "${FAILED}" -eq 0 ] || { echo ""; echo "ShellCheck found issues in scripts/."; exit 1; }
+
+  # ── Secret scanning ─────────────────────────────────────────────────────────
+  # Scans committed source files for patterns that look like hardcoded secrets.
+  # This is a defense-in-depth measure; primary secret scanning should be done
+  # via GitHub Secret Scanning or Gitleaks in a separate tool.
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # Full history for scanning all commits
+
+      - name: Scan for hardcoded secret patterns
+        run: |
+          echo "=== Scanning source files for secret patterns ==="
+          FOUND=0
+
+          # Patterns to detect in source files (NOT in test fixtures or comments)
+          # These would be catastrophic if committed accidentally.
+          check_pattern() {
+            local description="${1}"
+            local pattern="${2}"
+            local exclude_pattern="${3:-^$}"
+
+            # Search only in shell source files, not in test fixture data
+            if grep -rE "${pattern}" \
+                --include="*.zsh" \
+                --include="*.sh" \
+                --include="*.yml" \
+                --include="*.yaml" \
+                plugin/ scripts/ .github/ \
+                | grep -vE "${exclude_pattern}" \
+                | grep -v '# Example:' \
+                | grep -v '# e.g.' \
+                | grep -v 'redact' \
+                | grep -v 'detect' \
+                | grep -v 'pattern' \
+                | grep -v 'AKIA[A-Z0-9]{16}' \
+                | grep -v 'test\|mock\|fake\|stub' \
+                2>/dev/null; then
+              echo ""
+              echo "POTENTIAL SECRET FOUND (${description}) in the above lines"
+              echo "If this is a false positive, add an inline exclusion comment."
+              FOUND=1
+            fi
+          }
+
+          # AWS Access Key ID format: AKIA[A-Z0-9]{16}
+          check_pattern "AWS Access Key ID" 'AKIA[A-Z0-9]{16}' 'AKIA\[A-Z0-9\]'
+
+          # Generic high-entropy Base64 API tokens > 40 chars assigned in code
+          # Exclude: variable definitions that reference OTHER vars, test patterns
+          check_pattern "Potential hardcoded token (long assignment)" \
+            '(token|secret|password|api_key)\s*=\s*["\x27][A-Za-z0-9+/=_-]{40,}["\x27]' \
+            'redact|filter|pattern|detect'
+
+          # Private key PEM block in source (should never appear in code)
+          check_pattern "PEM private key" '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' ''
+
+          if [ "${FOUND}" -eq 1 ]; then
+            echo ""
+            echo "Secret scan FAILED. Review the matches above before merging."
+            exit 1
+          else
+            echo "No hardcoded secrets detected."
+          fi
+
+      - name: Verify no external URLs hardcoded (localhost-only policy)
+        run: |
+          echo "=== Checking localhost-only policy ==="
+
+          # Find any HTTP/HTTPS URLs in plugin source that are NOT localhost/127.0.0.1
+          EXTERNAL_URLS=$(grep -rE 'https?://[^"'"'"'\s]+' \
+            --include="*.zsh" \
+            plugin/ \
+            | grep -vE 'localhost|127\.0\.0\.1|::1|\$\{|example\.com|ollama\.ai' \
+            | grep -v '#' \
+            2>/dev/null || true)
+
+          if [ -n "${EXTERNAL_URLS}" ]; then
+            echo "External URLs found in plugin source (violates localhost-only policy):"
+            echo "${EXTERNAL_URLS}"
+            exit 1
+          else
+            echo "No external URLs in plugin source. Localhost-only policy OK."
+          fi
+
+  # ── Install script smoke test ────────────────────────────────────────────────
+  install-smoke:
+    name: "Install script smoke test (${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install zsh (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y zsh
+
+      - name: Verify install script syntax
+        run: |
+          bash -n scripts/install.sh
+          echo "install.sh syntax OK"
+          bash -n scripts/uninstall.sh
+          echo "uninstall.sh syntax OK"
+
+      - name: Smoke-test install script (manual method, no Ollama)
+        run: |
+          echo "=== Testing install.sh --method=manual --no-ollama-check ==="
+
+          # Run installer in a temp directory to avoid modifying the test runner's env
+          INSTALL_TARGET="${RUNNER_TEMP}/zsh-ai-complete-test"
+          bash scripts/install.sh \
+            --method=manual \
+            --dir="${INSTALL_TARGET}" \
+            --no-ollama-check
+
+          # Verify installation artifacts exist
+          echo ""
+          echo "=== Verifying installed files ==="
+          for required_file in \
+            "${INSTALL_TARGET}/zsh-ai-complete.plugin.zsh" \
+            "${INSTALL_TARGET}/lib/config.zsh" \
+            "${INSTALL_TARGET}/lib/security.zsh" \
+            "${INSTALL_TARGET}/lib/context.zsh" \
+            "${INSTALL_TARGET}/lib/prompt.zsh" \
+            "${INSTALL_TARGET}/lib/ollama.zsh" \
+            "${INSTALL_TARGET}/lib/suggestion.zsh" \
+            "${INSTALL_TARGET}/lib/async.zsh" \
+            "${INSTALL_TARGET}/lib/keybindings.zsh" \
+            "${INSTALL_TARGET}/lib/init.zsh"; do
+            if [ -f "${required_file}" ]; then
+              echo "  OK: ${required_file}"
+            else
+              echo "  MISSING: ${required_file}"
+              exit 1
+            fi
+          done
+
+          # Verify cache directory was created with secure permissions
+          CACHE_DIR="${HOME}/.cache/zsh-ai-complete"
+          if [ -d "${CACHE_DIR}" ]; then
+            PERMS="$(stat -c '%a' "${CACHE_DIR}" 2>/dev/null || stat -f '%Mp%Lp' "${CACHE_DIR}" 2>/dev/null || echo 'unknown')"
+            echo ""
+            echo "Cache directory permissions: ${PERMS}"
+            if [ "${PERMS}" = "700" ] || [ "${PERMS}" = "0700" ]; then
+              echo "OK: Cache directory has secure permissions (700)"
+            else
+              echo "WARN: Cache directory permissions: ${PERMS} (expected 700)"
+              # Non-fatal — permissions vary by umask
+            fi
+          fi
+
+          echo ""
+          echo "Install smoke test PASSED"
+
+      - name: Smoke-test uninstall script (--purge)
+        run: |
+          echo "=== Testing uninstall.sh --method=manual --purge ==="
+          bash scripts/uninstall.sh --method=manual --purge
+          echo "Uninstall smoke test PASSED"
+
+  # ── Aggregate status ────────────────────────────────────────────────────────
+  lint-passed:
+    name: All Lint Checks Passed
+    runs-on: ubuntu-latest
+    needs: [shellcheck, secret-scan, install-smoke]
+    if: always()
+    steps:
+      - name: Check results
+        run: |
+          if [ "${{ needs.shellcheck.result }}" = "success" ] && \
+             [ "${{ needs.secret-scan.result }}" = "success" ] && \
+             [ "${{ needs.install-smoke.result }}" = "success" ]; then
+            echo "All lint checks passed."
+            exit 0
+          else
+            echo "One or more lint checks failed:"
+            echo "  shellcheck:   ${{ needs.shellcheck.result }}"
+            echo "  secret-scan:  ${{ needs.secret-scan.result }}"
+            echo "  install-smoke: ${{ needs.install-smoke.result }}"
+            exit 1
+          fi

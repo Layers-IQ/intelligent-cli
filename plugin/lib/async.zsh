@@ -192,6 +192,10 @@ _zai_debounce_start() {
   local sleep_secs
   printf -v sleep_secs '%d.%03d' "${whole}" "${frac}"
 
+  # Capture BUFFER now (in widget context) — BUFFER is not reliably accessible
+  # inside zle -F callbacks on all terminals/zsh builds.
+  typeset -g _ZAI_DEBOUNCE_BUFFER="${BUFFER}"
+
   # Open read-end fd connected to a process substitution that produces output
   # after the debounce delay.  {_ZAI_TIMER_FD} allocates a free fd number and
   # stores it in the named variable (zsh 4.2+ automatic fd allocation).
@@ -228,12 +232,13 @@ _zai_timer_cb() {
   # HUP signals that the fd was closed before data arrived (normal cancellation)
   [[ -n "${err}" ]] && return 0
 
-  # Length gate: only fire if the user has typed enough characters
+  # Length gate: use the buffer captured at debounce-start time (BUFFER is not
+  # reliably accessible inside zle -F callbacks on all terminals/zsh builds).
   local min_chars
   min_chars="$(_zai_config_get min_chars 2>/dev/null)" || min_chars=3
 
-  if (( ${#BUFFER} >= min_chars )); then
-    _zai_async_request "${BUFFER}"
+  if (( ${#_ZAI_DEBOUNCE_BUFFER} >= min_chars )); then
+    _zai_async_request "${_ZAI_DEBOUNCE_BUFFER}"
   fi
 }
 
@@ -396,10 +401,13 @@ _zai_async_callback() {
 
   # ── Unavailability signal ──────────────────────────────────────────────────
   if [[ "${result}" == "UNAVAIL:"* ]]; then
-    # Mark Ollama unavailable and start the cooldown timer
-    _ZAI_OLLAMA_AVAILABLE=0
-    _ZAI_OLLAMA_FAIL_SECONDS="${SECONDS}"
-    # History suggestion already displayed — nothing more to do
+    # Require 3 consecutive failures before marking Ollama unavailable.
+    # A single UNAVAIL can be a transient race (e.g. cancelled curl, model busy).
+    (( _ZAI_OLLAMA_FAIL_COUNT = ${_ZAI_OLLAMA_FAIL_COUNT:-0} + 1 ))
+    if (( _ZAI_OLLAMA_FAIL_COUNT >= 3 )); then
+      _ZAI_OLLAMA_AVAILABLE=0
+      _ZAI_OLLAMA_FAIL_SECONDS="${SECONDS}"
+    fi
     return 0
   fi
 
@@ -417,11 +425,14 @@ _zai_async_callback() {
   # Successful round-trip to Ollama — mark as available, clear fail timestamp
   _ZAI_OLLAMA_AVAILABLE=1
   _ZAI_OLLAMA_FAIL_SECONDS=-1
+  _ZAI_OLLAMA_FAIL_COUNT=0
 
-  # Delegate display to SuggestionManager (it performs its own BUFFER staleness
-  # check as a second defensive layer)
+  # Store the completion and apply it via a ZLE widget instead of directly.
+  # BUFFER is empty in zle -F callbacks on some zsh/macOS builds, which breaks
+  # POSTDISPLAY rendering. Invoking a real widget ensures proper ZLE context.
   if [[ -n "${completion}" ]]; then
-    _zai_suggestion_update "${completion}"
+    typeset -g _ZAI_PENDING_COMPLETION="${completion}"
+    zle _zai_widget_apply_completion 2>/dev/null
   fi
 }
 
